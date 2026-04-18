@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from .constants import ACCOUNT_OPTIONS, CATEGORY_MAP, DB_PATH, DEFAULT_SETTINGS
+from .constants import ACCOUNT_OPTIONS, CATEGORY_MAP, DB_PATH, DEFAULT_SETTINGS, SECONDARY_DB_PATH
 
 
 def utc_now() -> str:
@@ -34,11 +35,22 @@ def classify_account_name(account_name: str) -> str:
 
 
 class FinanceRepository:
-    def __init__(self, db_path: str | Path = DB_PATH) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = DB_PATH,
+        secondary_db_paths: Iterable[str | Path] | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
+        if secondary_db_paths is None:
+            if self.db_path.resolve() == DB_PATH.resolve():
+                secondary_db_paths = (SECONDARY_DB_PATH,)
+            else:
+                secondary_db_paths = (self.db_path.parent / "data" / "finance.db",)
+        self.secondary_db_paths = [Path(path) for path in secondary_db_paths]
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.init_db()
+        self.reconciliation_summary = self.reconcile_secondary_databases()
 
     @contextmanager
     def transaction(self):
@@ -178,6 +190,148 @@ class FinanceRepository:
         for key, value in DEFAULT_SETTINGS.items():
             self.upsert_setting(key, value, commit=False)
         self.conn.commit()
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _normalize_subcategory(value: str | None) -> str:
+        return str(value or "").strip() or "Other expense"
+
+    @classmethod
+    def _transaction_signature(cls, row: sqlite3.Row | tuple) -> tuple:
+        if isinstance(row, sqlite3.Row):
+            return (
+                str(row["date"] or ""),
+                str(row["description"] or ""),
+                str(row["category"] or ""),
+                cls._normalize_subcategory(row["subcategory"]),
+                str(row["debit_account"] or ""),
+                str(row["credit_account"] or ""),
+                float(row["amount"] or 0),
+            )
+        return (
+            str(row[0] or ""),
+            str(row[1] or ""),
+            str(row[2] or ""),
+            cls._normalize_subcategory(row[3]),
+            str(row[4] or ""),
+            str(row[5] or ""),
+            float(row[6] or 0),
+        )
+
+    def reconcile_secondary_databases(self) -> dict[str, int]:
+        summary = {
+            "databases_checked": 0,
+            "inserted_transactions": 0,
+            "updated_subcategories": 0,
+            "upserted_budgets": 0,
+        }
+
+        for secondary_path in self.secondary_db_paths:
+            secondary_path = Path(secondary_path)
+            if not secondary_path.exists():
+                continue
+            if secondary_path.resolve() == self.db_path.resolve():
+                continue
+
+            summary["databases_checked"] += 1
+            secondary_conn = sqlite3.connect(secondary_path)
+            secondary_conn.row_factory = sqlite3.Row
+            try:
+                if not self._table_exists(secondary_conn, "transactions"):
+                    continue
+
+                secondary_rows = secondary_conn.execute(
+                    """
+                    SELECT date, description, category, subcategory, debit_account, credit_account, amount
+                    FROM transactions
+                    ORDER BY date, id
+                    """
+                ).fetchall()
+
+                with self.transaction() as conn:
+                    for row in secondary_rows:
+                        subcategory = str(row["subcategory"] or "").strip()
+                        if not subcategory:
+                            continue
+                        cursor = conn.execute(
+                            """
+                            UPDATE transactions
+                            SET subcategory = ?
+                            WHERE date = ?
+                              AND COALESCE(description, '') = ?
+                              AND COALESCE(category, '') = ?
+                              AND COALESCE(debit_account, '') = ?
+                              AND COALESCE(credit_account, '') = ?
+                              AND COALESCE(amount, 0) = ?
+                              AND COALESCE(subcategory, '') = ''
+                            """,
+                            (
+                                subcategory,
+                                str(row["date"] or ""),
+                                str(row["description"] or ""),
+                                str(row["category"] or ""),
+                                str(row["debit_account"] or ""),
+                                str(row["credit_account"] or ""),
+                                float(row["amount"] or 0),
+                            ),
+                        )
+                        summary["updated_subcategories"] += int(cursor.rowcount or 0)
+
+                    primary_rows = conn.execute(
+                        """
+                        SELECT date, description, category, subcategory, debit_account, credit_account, amount
+                        FROM transactions
+                        """
+                    ).fetchall()
+                    primary_signatures = Counter(self._transaction_signature(row) for row in primary_rows)
+                    secondary_signatures = Counter(self._transaction_signature(row) for row in secondary_rows)
+                    missing_rows = list((secondary_signatures - primary_signatures).elements())
+
+                    for row in missing_rows:
+                        conn.execute(
+                            """
+                            INSERT INTO transactions (
+                                date, description, category, subcategory, debit_account, credit_account, amount
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                row[0],
+                                row[1],
+                                row[2],
+                                self._normalize_subcategory(row[3]),
+                                row[4],
+                                row[5],
+                                float(row[6]),
+                            ),
+                        )
+                    summary["inserted_transactions"] += len(missing_rows)
+
+                    if self._table_exists(secondary_conn, "budgets"):
+                        budget_rows = secondary_conn.execute(
+                            "SELECT category, monthly_limit FROM budgets"
+                        ).fetchall()
+                        for budget_row in budget_rows:
+                            conn.execute(
+                                """
+                                INSERT INTO budgets (category, monthly_limit)
+                                VALUES (?, ?)
+                                ON CONFLICT(category) DO UPDATE SET monthly_limit = excluded.monthly_limit
+                                """,
+                                (budget_row["category"], float(budget_row["monthly_limit"] or 0)),
+                            )
+                        summary["upserted_budgets"] += len(budget_rows)
+            finally:
+                secondary_conn.close()
+
+        return summary
 
     def close(self) -> None:
         self.conn.close()

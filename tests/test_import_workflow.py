@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -240,6 +241,85 @@ class ImportWorkflowTests(unittest.TestCase):
         first_row = insights_df.iloc[0]
         self.assertEqual(float(first_row["confidence"]), 0.42)
         self.assertEqual(first_row["parse_notes"], "low OCR confidence")
+
+    def test_repository_reconciles_secondary_database_transactions(self) -> None:
+        primary_path = self.base / "primary.db"
+        secondary_path = self.base / "data" / "finance.db"
+        secondary_path.parent.mkdir(parents=True, exist_ok=True)
+
+        bootstrap_repo = FinanceRepository(primary_path, secondary_db_paths=[])
+        bootstrap_repo.record_transaction(
+            "2026-03-01",
+            "shared tx",
+            "Food",
+            "",
+            "Expense",
+            "Cash",
+            100000,
+        )
+        bootstrap_repo.close()
+
+        secondary_conn = sqlite3.connect(secondary_path)
+        secondary_conn.execute(
+            """
+            CREATE TABLE transactions (
+                id INTEGER PRIMARY KEY,
+                date TEXT,
+                description TEXT,
+                category TEXT,
+                debit_account TEXT,
+                credit_account TEXT,
+                amount REAL,
+                subcategory TEXT
+            )
+            """
+        )
+        secondary_conn.execute(
+            """
+            CREATE TABLE budgets (
+                category TEXT PRIMARY KEY,
+                monthly_limit REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        secondary_conn.execute(
+            """
+            INSERT INTO transactions (date, description, category, debit_account, credit_account, amount, subcategory)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-03-01", "shared tx", "Food", "Expense", "Cash", 100000, "Dining out"),
+        )
+        secondary_conn.execute(
+            """
+            INSERT INTO transactions (date, description, category, debit_account, credit_account, amount, subcategory)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-03-28", "new tx", "Transportation", "Expense", "Liability:Payable", 285000, "Car payments"),
+        )
+        secondary_conn.execute(
+            """
+            INSERT INTO budgets (category, monthly_limit) VALUES (?, ?)
+            """,
+            ("Transportation", 5000000),
+        )
+        secondary_conn.commit()
+        secondary_conn.close()
+
+        reconciled_repo = FinanceRepository(primary_path, secondary_db_paths=[secondary_path])
+        try:
+            ledger_df = reconciled_repo.get_ledger()
+            shared_rows = ledger_df[ledger_df["description"] == "shared tx"]
+            new_rows = ledger_df[ledger_df["description"] == "new tx"]
+            budgets_df = reconciled_repo.get_budgets()
+
+            self.assertEqual(reconciled_repo.reconciliation_summary["inserted_transactions"], 1)
+            self.assertEqual(reconciled_repo.reconciliation_summary["updated_subcategories"], 1)
+            self.assertEqual(len(shared_rows), 1)
+            self.assertEqual(shared_rows.iloc[0]["subcategory"], "Dining out")
+            self.assertEqual(len(new_rows), 1)
+            self.assertIn("Transportation", budgets_df["category"].tolist())
+        finally:
+            reconciled_repo.close()
 
 
 if __name__ == "__main__":

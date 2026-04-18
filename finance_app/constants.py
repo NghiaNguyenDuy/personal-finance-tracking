@@ -51,6 +51,7 @@ DEFAULT_CREDIT_ACCOUNTS = [
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT_DIR / "finance.db"
+SECONDARY_DB_PATH = ROOT_DIR / "data" / "finance.db"
 
 SOURCE_TCB_IMAGE = "tcb_image"
 SOURCE_HSBC = "hsbc"
