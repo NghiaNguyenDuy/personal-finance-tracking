@@ -1,4 +1,5 @@
-venv/
+.venv/
 materials/
 raw_data/
+data/finance.db
 finance.db
