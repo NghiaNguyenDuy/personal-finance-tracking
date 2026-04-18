@@ -1,6 +1,6 @@
-﻿import streamlit as st
+import streamlit as st
 
-from finance_app.ui import run_app
+from finance_app import run_app
 
 
 if __name__ == "__main__":

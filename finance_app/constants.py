@@ -19,45 +19,67 @@ CATEGORY_MAP = {
     "Others": ["Other expense"],
 }
 
-ACCOUNT_TYPES = ("Asset", "Liability", "Equity", "Income", "Expense")
-SUPPORTED_CURRENCY = "VND"
-
-DEFAULT_ACCOUNTS = [
-    {"name": "Asset:Receivable", "account_type": "Asset"},
-    {"name": "Asset:Savings", "account_type": "Asset"},
-    {"name": "Cash", "account_type": "Asset"},
-    {"name": "Equity:General", "account_type": "Equity"},
-    {"name": "Equity:Opening Balance", "account_type": "Equity"},
-    {"name": "Expense", "account_type": "Expense"},
-    {"name": "Income:Salary", "account_type": "Income"},
-    {"name": "Liability:Payable", "account_type": "Liability"},
+ACCOUNT_OPTIONS = [
+    "Asset:Receivable",
+    "Asset:Savings",
+    "Cash",
+    "Equity:General",
+    "Equity:Opening Balance",
+    "Expense",
+    "Income:Salary",
+    "Liability:Payable",
 ]
 
-DEFAULT_DEBIT_ACCOUNT = "Expense"
-DEFAULT_CREDIT_ACCOUNT = "Cash"
+DEFAULT_DEBIT_ACCOUNTS = [
+    "Cash",
+    "Expense",
+    "Asset:Receivable",
+    "Asset:Savings",
+    "Liability:Payable",
+    "Equity:General",
+]
+
+DEFAULT_CREDIT_ACCOUNTS = [
+    "Cash",
+    "Income:Salary",
+    "Liability:Payable",
+    "Equity:Opening Balance",
+    "Equity:General",
+    "Asset:Savings",
+    "Asset:Receivable",
+]
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-ACTIVE_DB_PATH = ROOT_DIR / "data" / "finance.db"
-BACKUP_DIR = ROOT_DIR / "backups"
-LEGACY_DB_PATH = ROOT_DIR / "finance.db"
-PRIMARY_ENTRYPOINT = "system_v2.py"
+DB_PATH = ROOT_DIR / "finance.db"
 
+SOURCE_TCB_IMAGE = "tcb_image"
+SOURCE_HSBC = "hsbc"
 
-def infer_account_type_from_name(account_name: str) -> str:
-    account_name = str(account_name or "").strip()
-    if account_name.startswith("Asset:"):
-        return "Asset"
-    if account_name.startswith("Liability:"):
-        return "Liability"
-    if account_name.startswith("Equity:"):
-        return "Equity"
-    if account_name.startswith("Income:"):
-        return "Income"
-    if account_name.startswith("Expense:"):
-        return "Expense"
-    if account_name == "Cash":
-        return "Asset"
-    if account_name == "Expense":
-        return "Expense"
-    return "Expense"
+DEFAULT_SETTINGS = {
+    "hsbc_password": "16Jan2001281717",
+    "hsbc_folder": str(ROOT_DIR / "raw_data" / "hsbc"),
+    "tcb_image_folder": str(ROOT_DIR / "raw_data" / "tcb" / "images"),
+    "tesseract_cmd": "",
+    "default_tcb_cash_account": "Cash",
+    "default_tcb_offset_account": "Expense",
+    "default_hsbc_liability_account": "Liability:Payable",
+}
+
+HSBC_PAYMENT_KEYWORDS = ("CARDHOLDER PAYMENT", "PAYMENT RECEIVED", "PAYMENT", "TRANSFER")
+HSBC_CREDIT_KEYWORDS = ("CASHBACK", "REFUND", "REVERSAL", "CREDITED")
+HSBC_FEE_KEYWORDS = ("FEE", "LATE CHARGE", "FINANCE CHARGE", "INTEREST")
+HSBC_INSTALLMENT_KEYWORDS = ("TRA GOP", "INSTALLMENT")
+
+MERCHANT_CATEGORY_HINTS = {
+    "SHOPEE": ("Personal Care/Lifestyle", "Entertainment"),
+    "GRAB": ("Transportation", "Public transit fees"),
+    "BACHHOAXANH": ("Food", "Groceries"),
+    "LONGCHAU": ("Healthcare", "Prescriptions"),
+    "CIRCLE K": ("Food", "Groceries"),
+    "EMART": ("Food", "Groceries"),
+    "YOUTUBE": ("Personal Care/Lifestyle", "Subscriptions"),
+    "ZALOPAY": ("Personal Care/Lifestyle", "Subscriptions"),
+    "YSL": ("Family/Love/Dependents", "Love"),
+    "PAYOO": ("Others", "Other expense"),
+}
 
