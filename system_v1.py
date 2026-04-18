@@ -1,4 +1,4 @@
-import sqlite3
+﻿"""Legacy reference module. This file is kept for history only and is not a supported runtime entrypoint."""`r`n`r`nimport sqlite3
 import pandas as pd
 import streamlit as st
 from datetime import date
@@ -93,15 +93,15 @@ if __name__ == "__main__":
                     "Protection": ["Life insurance", "Disability insurance", "Estate planning"],
                     "Others": "Other expense"
                     }
-    tab1, tab2, tab3 = st.tabs(["🧾 Transactions", "📊 Insights", "✏️ Edit Transactions"])
+    tab1, tab2, tab3 = st.tabs(["ðŸ§¾ Transactions", "ðŸ“Š Insights", "âœï¸ Edit Transactions"])
     with tab1:
         conn = init_db()
 
-        st.title("📘 Personal Finance Manager with T-Accounts")
+        st.title("ðŸ“˜ Personal Finance Manager with T-Accounts")
 
 
         # --- Add Transaction ---
-        st.header("➕ Add New Transaction")
+        st.header("âž• Add New Transaction")
 
         category = st.selectbox("Category", list(dict_category.keys()), key="category")
         sub_categories = dict_category.get(category, [])
@@ -125,13 +125,13 @@ if __name__ == "__main__":
 
         
         # --- View Ledger ---
-        st.header("📑 Ledger")
+        st.header("ðŸ“‘ Ledger")
         st.dataframe(get_ledger(conn)[:20].style.format({
                     'amount': '{:,.0f}'  # Format with commas and no decimal places
                 }))
         
         # --- View Balances ---
-        st.header("📊 Account Balances")
+        st.header("ðŸ“Š Account Balances")
         balance = get_account_balance(conn)
         balance.rename(columns={'debit_account': 'account'}, inplace=True)
         st.dataframe(balance.style.format({
@@ -150,7 +150,7 @@ if __name__ == "__main__":
         )
 
         # Display Balance Sheet
-        st.header("📊 Balance Sheet")
+        st.header("ðŸ“Š Balance Sheet")
 
         col1, col2 = st.columns(2)
 
@@ -177,7 +177,7 @@ if __name__ == "__main__":
         st.metric("Total Liabilities + Equity", f"{liab_eq_total:,.0f}")
 
     with tab3:
-        st.header("✏️ Edit or Delete Transactions")
+        st.header("âœï¸ Edit or Delete Transactions")
         df = get_ledger(conn)
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
@@ -205,11 +205,11 @@ if __name__ == "__main__":
             #     amount_edit = st.number_input("Amount", value=selected_row['amount'], format="%.2f")
 
             #     col1, col2 = st.columns(2)
-            #     if col1.form_submit_button("✅ Update Transaction"):
+            #     if col1.form_submit_button("âœ… Update Transaction"):
             #         update_transaction(conn, tx_id, date_edit.isoformat(), desc_edit, cat_edit, subcat_edit, debit_edit, credit_edit, amount_edit)
             #         st.success("Transaction updated!")
 
-            #     if col2.form_submit_button("🗑️ Delete Transaction"):
+            #     if col2.form_submit_button("ðŸ—‘ï¸ Delete Transaction"):
             #         delete_transaction(conn, tx_id)
             #         st.warning("Transaction deleted!")
 
@@ -273,7 +273,7 @@ if __name__ == "__main__":
                         amount_edit = st.number_input("Amount", min_value=0.0, value=row['amount'], format="%.0f", key=f"amt_{row['id']}")
 
                     c1, c2 = st.columns(2)
-                    if c1.form_submit_button("✅ Update"):
+                    if c1.form_submit_button("âœ… Update"):
                         update_transaction(
                             conn,
                             row['id'],
@@ -287,11 +287,11 @@ if __name__ == "__main__":
                         )
                         st.success(f"Transaction {row['id']} updated!")
 
-                    if c2.form_submit_button("🗑 Delete"):
+                    if c2.form_submit_button("ðŸ—‘ Delete"):
                         delete_transaction(conn, row['id'])
                         st.warning(f"Transaction {row['id']} deleted!")
 
-        st.subheader(f"📄 Filtered Transactions ({len(filtered_df)} rows)")
+        st.subheader(f"ðŸ“„ Filtered Transactions ({len(filtered_df)} rows)")
         st.dataframe(filtered_df.style.format({
                             'amount': '{:,.0f}'  # Format with commas and no decimal places
                         }), use_container_width=True)
@@ -299,7 +299,7 @@ if __name__ == "__main__":
         
 
     with tab2:
-        st.header("📊 Finance Insights Dashboard")
+        st.header("ðŸ“Š Finance Insights Dashboard")
 
 
 
@@ -318,19 +318,19 @@ if __name__ == "__main__":
         monthly_income.rename({"amount": "Income"}, axis=1, inplace=True)
         monthly_summary = pd.concat([monthly_income[["Income"]], monthly_expense], axis=1).fillna(0).reset_index()
 
-        st.subheader("🗂️ Set Monthly Budget per Category")
+        st.subheader("ðŸ—‚ï¸ Set Monthly Budget per Category")
 
         budget_df = pd.read_sql_query("SELECT * FROM budgets", conn)
         category_input = st.selectbox("Select Category", sorted(budget_df['category'].unique()))
         budget_input = st.number_input("Monthly Budget (VND)", min_value=0.0, format="%.0f")
 
-        if st.button("💾 Save Budget"):
+        if st.button("ðŸ’¾ Save Budget"):
             conn.execute("REPLACE INTO budgets (category, monthly_limit) VALUES (?, ?)", (category_input, budget_input))
             conn.commit()
             st.success(f"Budget saved for {category_input}")
 
 
-        st.subheader("💰 Monthly Income vs Expense")
+        st.subheader("ðŸ’° Monthly Income vs Expense")
         # st.line_chart(pd.DataFrame({
         #     "Income": monthly_income,
         #     "Expense": monthly_expense
@@ -344,7 +344,7 @@ if __name__ == "__main__":
             x='month',
             y='Amount',
             color='Type',
-            title='💰 Monthly Income vs Expense',
+            title='ðŸ’° Monthly Income vs Expense',
             color_discrete_map={'Income': 'green', 'Expense': 'red'},
             markers=True
         )
@@ -354,7 +354,7 @@ if __name__ == "__main__":
 
         st.plotly_chart(fig, use_container_width=True)
 
-        st.header("📊 Monthly Expenses by Category")
+        st.header("ðŸ“Š Monthly Expenses by Category")
 
         # Load from database
         df = pd.read_sql_query("SELECT * FROM transactions", conn)
@@ -401,7 +401,7 @@ if __name__ == "__main__":
         # Show in Streamlit
         st.pyplot(fig)
 
-        st.header("📊 Net Monthly Balance by Account (All Types)")
+        st.header("ðŸ“Š Net Monthly Balance by Account (All Types)")
 
 
 
@@ -437,7 +437,7 @@ if __name__ == "__main__":
         st.pyplot(fig)
 
 
-        st.header("📊 Investment Overview")
+        st.header("ðŸ“Š Investment Overview")
 
         # Filter only investment-related transactions
         inv_df = df[df['category'] == 'investment']
@@ -471,7 +471,7 @@ if __name__ == "__main__":
             monthly_summary,
             x='month',
             y=['Inflow', 'Outflow', 'Net'],
-            title='📈 Investment Efficiency Over Time',
+            title='ðŸ“ˆ Investment Efficiency Over Time',
             labels={'value': 'Amount', 'month': 'Month'},
             barmode='group',
             color_discrete_map={
@@ -487,7 +487,7 @@ if __name__ == "__main__":
         # Streamlit display
         st.plotly_chart(fig, use_container_width=True)
 
-        st.header("📊 Pivot Table: Monthly Expenses by Category and Sub-category")
+        st.header("ðŸ“Š Pivot Table: Monthly Expenses by Category and Sub-category")
 
         # Step 1: Prepare base data
         df = pd.read_sql_query("SELECT * FROM transactions", conn)
@@ -512,7 +512,7 @@ if __name__ == "__main__":
         )
 
 
-        st.header("📊 Budget vs. Actual Chart")
+        st.header("ðŸ“Š Budget vs. Actual Chart")
         # Step 5: Display in Streamlit
         st.dataframe(styled_table, use_container_width=True)
 
@@ -536,7 +536,7 @@ if __name__ == "__main__":
             x='category',
             y=['monthly_limit', 'amount'],
             barmode='group',
-            title=f"📊 Budget vs Actual Expenses ({latest_month})",
+            title=f"ðŸ“Š Budget vs Actual Expenses ({latest_month})",
             labels={'value': 'VND'},
             color_discrete_map={
                 'monthly_limit': 'gray',
@@ -547,4 +547,5 @@ if __name__ == "__main__":
         fig.update_layout(xaxis_tickangle=-45, yaxis_title="VND", legend_title="")
 
         st.plotly_chart(fig, use_container_width=True)
+
 

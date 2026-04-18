@@ -1,4 +1,4 @@
-# # Personal Finance Manager using Streamlit, SQLAlchemy, and PDF parsing
+﻿"""Legacy reference module. This file is kept for history only and is not a supported runtime entrypoint."""`r`n`r`n# # Personal Finance Manager using Streamlit, SQLAlchemy, and PDF parsing
 
 # import streamlit as st
 # from sqlalchemy import create_engine, Column, Integer, String, Float, Date, Text
@@ -58,7 +58,7 @@
 
 # if __name__ == "__main__":
 #     # --- Streamlit App ---
-#     st.title("💼 Personal Finance Management")
+#     st.title("ðŸ’¼ Personal Finance Management")
 
 #     st.header("Add Daily Spending")
 #     date = st.date_input("Date", datetime.today())
@@ -181,14 +181,14 @@ def get_account_balance(conn):
 
 
 if __name__ == "__main__":
-    tab1, tab2, tab3 = st.tabs(["🧾 Transactions", "📊 Insights", "✏️ Edit Transactions"])
+    tab1, tab2, tab3 = st.tabs(["ðŸ§¾ Transactions", "ðŸ“Š Insights", "âœï¸ Edit Transactions"])
     with tab1:
         conn = init_db()
 
-        st.title("📘 Personal Finance Manager with T-Accounts")
+        st.title("ðŸ“˜ Personal Finance Manager with T-Accounts")
 
         # --- Add Transaction ---
-        st.header("➕ Add New Transaction")
+        st.header("âž• Add New Transaction")
         with st.form("entry_form"):
             t_date = st.date_input("Date", date.today())
             t_date = t_date.strftime("%Y-%m-%d")
@@ -238,13 +238,13 @@ if __name__ == "__main__":
         #                 }))
         
         # --- View Ledger ---
-        st.header("📑 Ledger")
+        st.header("ðŸ“‘ Ledger")
         st.dataframe(get_ledger(conn)[:20].style.format({
                     'amount': '{:,.0f}'  # Format with commas and no decimal places
                 }))
         
         # --- View Balances ---
-        st.header("📊 Account Balances")
+        st.header("ðŸ“Š Account Balances")
         balance = get_account_balance(conn)
         balance.rename(columns={'debit_account': 'account'}, inplace=True)
         st.dataframe(balance.style.format({
@@ -263,7 +263,7 @@ if __name__ == "__main__":
         )
 
         # Display Balance Sheet
-        st.header("📊 Balance Sheet")
+        st.header("ðŸ“Š Balance Sheet")
 
         col1, col2 = st.columns(2)
 
@@ -290,7 +290,7 @@ if __name__ == "__main__":
         st.metric("Total Liabilities + Equity", f"{liab_eq_total:,.0f}")
 
     with tab3:
-        st.header("✏️ Edit or Delete Transactions")
+        st.header("âœï¸ Edit or Delete Transactions")
         df = get_ledger(conn)
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'], format="%Y-%m-%d")
@@ -351,11 +351,11 @@ if __name__ == "__main__":
                 amount_edit = st.number_input("Amount", value=selected_row['amount'], format="%.2f")
 
                 col1, col2 = st.columns(2)
-                if col1.form_submit_button("✅ Update Transaction"):
+                if col1.form_submit_button("âœ… Update Transaction"):
                     update_transaction(conn, tx_id, date_edit.isoformat(), desc_edit, cat_edit, debit_edit, credit_edit, amount_edit)
                     st.success("Transaction updated!")
 
-                if col2.form_submit_button("🗑️ Delete Transaction"):
+                if col2.form_submit_button("ðŸ—‘ï¸ Delete Transaction"):
                     delete_transaction(conn, tx_id)
                     st.warning("Transaction deleted!")
 
@@ -399,7 +399,7 @@ if __name__ == "__main__":
         # Format amount and date
         filtered_df['date'] = filtered_df['date'].dt.strftime('%Y-%m-%d')
 
-        st.subheader(f"📄 Filtered Transactions ({len(filtered_df)} rows)")
+        st.subheader(f"ðŸ“„ Filtered Transactions ({len(filtered_df)} rows)")
         st.dataframe(filtered_df.style.format({
                             'amount': '{:,.0f}'  # Format with commas and no decimal places
                         }), use_container_width=True)
@@ -407,7 +407,7 @@ if __name__ == "__main__":
         
 
     with tab2:
-        st.header("📊 Finance Insights Dashboard")
+        st.header("ðŸ“Š Finance Insights Dashboard")
 
         df = pd.read_sql_query("SELECT * FROM transactions", conn)
         df['date'] = pd.to_datetime(df['date'], format="%Y-%m-%d")
@@ -423,7 +423,7 @@ if __name__ == "__main__":
         monthly_income = income_df.groupby('month')['amount'].sum().reset_index()
         monthly_income.rename({"amount": "Income"}, axis=1, inplace=True)
         monthly_summary = pd.concat([monthly_income[["Income"]], monthly_expense], axis=1).fillna(0).reset_index()
-        st.subheader("💰 Monthly Income vs Expense")
+        st.subheader("ðŸ’° Monthly Income vs Expense")
         # st.line_chart(pd.DataFrame({
         #     "Income": monthly_income,
         #     "Expense": monthly_expense
@@ -437,7 +437,7 @@ if __name__ == "__main__":
             x='month',
             y='Amount',
             color='Type',
-            title='💰 Monthly Income vs Expense',
+            title='ðŸ’° Monthly Income vs Expense',
             color_discrete_map={'Income': 'green', 'Expense': 'red'},
             markers=True
         )
@@ -447,7 +447,7 @@ if __name__ == "__main__":
 
         st.plotly_chart(fig, use_container_width=True)
 
-        st.header("📊 Monthly Expenses by Category")
+        st.header("ðŸ“Š Monthly Expenses by Category")
 
         # Load from database
         df = pd.read_sql_query("SELECT * FROM transactions", conn)
@@ -494,7 +494,7 @@ if __name__ == "__main__":
         # Show in Streamlit
         st.pyplot(fig)
 
-        st.header("📊 Net Monthly Balance by Account (All Types)")
+        st.header("ðŸ“Š Net Monthly Balance by Account (All Types)")
 
 
 
@@ -530,7 +530,7 @@ if __name__ == "__main__":
         st.pyplot(fig)
 
 
-        st.header("📊 Investment Overview")
+        st.header("ðŸ“Š Investment Overview")
 
         # Prepare data
         # df['date'] = pd.to_datetime(df['date'])
@@ -568,7 +568,7 @@ if __name__ == "__main__":
             monthly_summary,
             x='month',
             y=['Inflow', 'Outflow', 'Net'],
-            title='📈 Investment Efficiency Over Time',
+            title='ðŸ“ˆ Investment Efficiency Over Time',
             labels={'value': 'Amount', 'month': 'Month'},
             barmode='group',
             color_discrete_map={
@@ -585,7 +585,7 @@ if __name__ == "__main__":
         st.plotly_chart(fig, use_container_width=True)
 
         # # --- Expense Pie Chart
-        # st.subheader("🧁 Expense Distribution")
+        # st.subheader("ðŸ§ Expense Distribution")
         # st.pyplot(top_categories.plot.pie(autopct='%1.1f%%', figsize=(5, 5)).get_figure())
 
         # # --- Account Balance
@@ -593,5 +593,6 @@ if __name__ == "__main__":
         # credit = df.groupby('credit_account')['amount'].sum()
         # balances = (debit - credit).fillna(0)
 
-        # st.subheader("🏦 Account Balances")
+        # st.subheader("ðŸ¦ Account Balances")
         # st.bar_chart(balances)
+

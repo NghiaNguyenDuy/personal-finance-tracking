@@ -1,4 +1,9 @@
+﻿.venv/
 venv/
+__pycache__/
+.pytest_cache/
 materials/
 raw_data/
 finance.db
+data/
+backups/
