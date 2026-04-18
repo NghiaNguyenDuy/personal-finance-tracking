@@ -1,10 +1,16 @@
 @echo off
-cd /d "C:\Users\nghia.n\OneDrive - COLLECTIUS SYSTEMS PTE. LTD\Documents\1.Personal\1.Learning\1. Practice\PersonaFinanceSystem"
-REM Initialize Conda for this shell session
-call C:\Users\nghia.n\AppData\Local\anaconda3\Scripts\activate.bat
+setlocal
 
-REM Activate your specific conda environment
-call conda activate spark-env
+set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
 
+if not exist ".venv\Scripts\activate.bat" (
+    echo Local virtual environment not found at ".venv\Scripts\activate.bat".
+    pause
+    exit /b 1
+)
+
+call ".venv\Scripts\activate.bat"
 streamlit run system_v2.py
-pause
+
+endlocal
