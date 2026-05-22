@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from collections import Counter
 from contextlib import contextmanager
@@ -11,6 +12,10 @@ from typing import Iterable
 import pandas as pd
 
 from .constants import ACCOUNT_OPTIONS, CATEGORY_MAP, DB_PATH, DEFAULT_SETTINGS, SECONDARY_DB_PATH
+
+FALLBACK_CATEGORY = "Others"
+FALLBACK_SUBCATEGORY = "Other expense"
+LOW_CONFIDENCE_THRESHOLD = 0.8
 
 
 def utc_now() -> str:
@@ -42,10 +47,7 @@ class FinanceRepository:
     ) -> None:
         self.db_path = Path(db_path)
         if secondary_db_paths is None:
-            if self.db_path.resolve() == DB_PATH.resolve():
-                secondary_db_paths = (SECONDARY_DB_PATH,)
-            else:
-                secondary_db_paths = (self.db_path.parent / "data" / "finance.db",)
+            secondary_db_paths = ()
         self.secondary_db_paths = [Path(path) for path in secondary_db_paths]
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -181,6 +183,93 @@ class FinanceRepository:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS legacy_category_mappings (
+                    source_category TEXT NOT NULL,
+                    source_subcategory TEXT NOT NULL DEFAULT '',
+                    target_category TEXT NOT NULL,
+                    target_subcategory TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_category, source_subcategory)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS investment_trades (
+                    id INTEGER PRIMARY KEY,
+                    transaction_id INTEGER UNIQUE,
+                    trade_date TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    quantity REAL NOT NULL DEFAULT 0,
+                    amount REAL NOT NULL DEFAULT 0,
+                    fees REAL NOT NULL DEFAULT 0,
+                    currency TEXT NOT NULL DEFAULT 'VND',
+                    parse_confidence REAL NOT NULL DEFAULT 0,
+                    review_status TEXT NOT NULL DEFAULT 'needs_review',
+                    notes TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS investment_price_snapshots (
+                    id INTEGER PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    price_date TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'VND',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(ticker, price_date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_quality_runs (
+                    id INTEGER PRIMARY KEY,
+                    run_type TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    notes TEXT DEFAULT '',
+                    details_json TEXT DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_quality_findings (
+                    id INTEGER PRIMARY KEY,
+                    run_id INTEGER NOT NULL,
+                    finding_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    transaction_ids TEXT DEFAULT '',
+                    finding_key TEXT DEFAULT '',
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    amount REAL NOT NULL DEFAULT 0,
+                    details_json TEXT DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ledger_repair_actions (
+                    id INTEGER PRIMARY KEY,
+                    action_type TEXT NOT NULL,
+                    backup_path TEXT NOT NULL,
+                    affected_transaction_ids TEXT NOT NULL,
+                    affected_count INTEGER NOT NULL,
+                    notes TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()
             }
@@ -220,6 +309,24 @@ class FinanceRepository:
             str(row[1] or ""),
             str(row[2] or ""),
             cls._normalize_subcategory(row[3]),
+            str(row[4] or ""),
+            str(row[5] or ""),
+            float(row[6] or 0),
+        )
+
+    @staticmethod
+    def _transaction_identity(row: sqlite3.Row | tuple) -> tuple:
+        if isinstance(row, sqlite3.Row):
+            return (
+                str(row["date"] or ""),
+                str(row["description"] or ""),
+                str(row["debit_account"] or ""),
+                str(row["credit_account"] or ""),
+                float(row["amount"] or 0),
+            )
+        return (
+            str(row[0] or ""),
+            str(row[1] or ""),
             str(row[4] or ""),
             str(row[5] or ""),
             float(row[6] or 0),
@@ -290,11 +397,15 @@ class FinanceRepository:
                         FROM transactions
                         """
                     ).fetchall()
-                    primary_signatures = Counter(self._transaction_signature(row) for row in primary_rows)
-                    secondary_signatures = Counter(self._transaction_signature(row) for row in secondary_rows)
-                    missing_rows = list((secondary_signatures - primary_signatures).elements())
+                    primary_identities = Counter(self._transaction_identity(row) for row in primary_rows)
+                    secondary_identities = Counter(self._transaction_identity(row) for row in secondary_rows)
+                    missing_identities = secondary_identities - primary_identities
 
-                    for row in missing_rows:
+                    inserted = 0
+                    for row in secondary_rows:
+                        identity = self._transaction_identity(row)
+                        if missing_identities[identity] <= 0:
+                            continue
                         conn.execute(
                             """
                             INSERT INTO transactions (
@@ -312,7 +423,9 @@ class FinanceRepository:
                                 float(row[6]),
                             ),
                         )
-                    summary["inserted_transactions"] += len(missing_rows)
+                        missing_identities[identity] -= 1
+                        inserted += 1
+                    summary["inserted_transactions"] += inserted
 
                     if self._table_exists(secondary_conn, "budgets"):
                         budget_rows = secondary_conn.execute(
@@ -355,6 +468,94 @@ class FinanceRepository:
             settings.setdefault(key, value)
         return settings
 
+    @staticmethod
+    def valid_subcategories_for_category(category: str) -> list[str]:
+        category = str(category or "").strip()
+        return list(CATEGORY_MAP.get(category, CATEGORY_MAP[FALLBACK_CATEGORY]))
+
+    @classmethod
+    def normalize_statement_category_subcategory(cls, category: str, subcategory: str) -> tuple[str, str]:
+        normalized_category = str(category or "").strip() or FALLBACK_CATEGORY
+        if normalized_category not in CATEGORY_MAP:
+            normalized_category = FALLBACK_CATEGORY
+
+        valid_subcategories = cls.valid_subcategories_for_category(normalized_category)
+        normalized_subcategory = str(subcategory or "").strip()
+        if normalized_subcategory not in valid_subcategories:
+            normalized_subcategory = valid_subcategories[0]
+        return normalized_category, normalized_subcategory
+
+    @classmethod
+    def validate_statement_classification(cls, category: str, subcategory: str) -> list[str]:
+        errors: list[str] = []
+        normalized_category = str(category or "").strip()
+        normalized_subcategory = str(subcategory or "").strip()
+
+        if normalized_category not in CATEGORY_MAP:
+            errors.append("Category is invalid.")
+            return errors
+
+        if normalized_subcategory not in CATEGORY_MAP[normalized_category]:
+            errors.append("Sub-category must belong to the selected category.")
+        return errors
+
+    @staticmethod
+    def _is_valid_transaction_date(value: str) -> bool:
+        try:
+            datetime.strptime(str(value or "").strip(), "%Y-%m-%d")
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _is_valid_amount(value: float | int | str) -> bool:
+        try:
+            return float(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _statement_row_validation_errors(cls, row: sqlite3.Row | dict) -> list[str]:
+        getter = row.get if isinstance(row, dict) else row.__getitem__
+        category = getter("category") if isinstance(row, dict) else row["category"]
+        subcategory = getter("subcategory") if isinstance(row, dict) else row["subcategory"]
+        debit_account = getter("debit_account") if isinstance(row, dict) else row["debit_account"]
+        credit_account = getter("credit_account") if isinstance(row, dict) else row["credit_account"]
+        transaction_date = getter("transaction_date") if isinstance(row, dict) else row["transaction_date"]
+        post_date = getter("post_date") if isinstance(row, dict) else row["post_date"]
+        amount = getter("amount") if isinstance(row, dict) else row["amount"]
+        confidence = getter("confidence") if isinstance(row, dict) else row["confidence"]
+
+        errors = cls.validate_statement_classification(category, subcategory)
+        if not debit_account or str(debit_account).strip() not in ACCOUNT_OPTIONS:
+            errors.append("Debit account is invalid.")
+        if not credit_account or str(credit_account).strip() not in ACCOUNT_OPTIONS:
+            errors.append("Credit account is invalid.")
+        effective_date = str(transaction_date or post_date or "").strip()
+        if not cls._is_valid_transaction_date(effective_date):
+            errors.append("Transaction date is invalid.")
+        if not cls._is_valid_amount(amount):
+            errors.append("Amount must be greater than zero.")
+        try:
+            numeric_confidence = float(confidence)
+        except (TypeError, ValueError):
+            numeric_confidence = 0
+        if numeric_confidence < LOW_CONFIDENCE_THRESHOLD:
+            errors.append("Confidence is below the review threshold.")
+        return errors
+
+    @classmethod
+    def _statement_row_state(cls, row: sqlite3.Row | dict) -> str:
+        getter = row.get if isinstance(row, dict) else row.__getitem__
+        review_status = str(getter("review_status") if isinstance(row, dict) else row["review_status"] or "")
+        if review_status == "posted":
+            return "posted"
+        if review_status == "ignored":
+            return "ignored"
+        if cls._statement_row_validation_errors(row):
+            return "needs_review"
+        return "ready_to_post"
+
     def get_setting(self, key: str, default: str = "") -> str:
         return self.get_settings().get(key, default)
 
@@ -366,6 +567,74 @@ class FinanceRepository:
             "SELECT category, monthly_limit FROM budgets ORDER BY category",
             self.conn,
         )
+
+    def get_legacy_category_mappings_df(self) -> pd.DataFrame:
+        return pd.read_sql_query(
+            """
+            SELECT source_category, source_subcategory, target_category, target_subcategory, updated_at
+            FROM legacy_category_mappings
+            ORDER BY source_category, source_subcategory
+            """,
+            self.conn,
+        )
+
+    def upsert_legacy_category_mapping(
+        self,
+        source_category: str,
+        source_subcategory: str,
+        target_category: str,
+        target_subcategory: str,
+    ) -> None:
+        errors = self.validate_statement_classification(target_category, target_subcategory)
+        if errors:
+            raise ValueError(" ".join(errors))
+        self.conn.execute(
+            """
+            INSERT INTO legacy_category_mappings (
+                source_category, source_subcategory, target_category, target_subcategory, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(source_category, source_subcategory) DO UPDATE SET
+                target_category = excluded.target_category,
+                target_subcategory = excluded.target_subcategory,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(source_category or "").strip(),
+                str(source_subcategory or "").strip(),
+                target_category,
+                target_subcategory,
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
+
+    def apply_legacy_category_mapping(
+        self,
+        source_category: str,
+        source_subcategory: str,
+        target_category: str,
+        target_subcategory: str,
+    ) -> int:
+        errors = self.validate_statement_classification(target_category, target_subcategory)
+        if errors:
+            raise ValueError(" ".join(errors))
+        cursor = self.conn.execute(
+            """
+            UPDATE transactions
+            SET category = ?, subcategory = ?
+            WHERE COALESCE(category, '') = ?
+              AND COALESCE(subcategory, '') = ?
+            """,
+            (
+                target_category,
+                target_subcategory,
+                str(source_category or "").strip(),
+                str(source_subcategory or "").strip(),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
 
     def save_budget(self, category: str, monthly_limit: float) -> None:
         self.conn.execute(
@@ -474,6 +743,426 @@ class FinanceRepository:
         if first_col != "account":
             balance = balance.rename(columns={first_col: "account"})
         return balance[["account", "balance"]]
+
+    def create_database_backup(self, label: str = "manual") -> str:
+        self.conn.commit()
+        backup_dir = self.db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        safe_label = "".join(character if character.isalnum() else "-" for character in str(label or "manual")).strip("-")
+        safe_label = safe_label or "manual"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_dir / f"{self.db_path.stem}_{timestamp}_{safe_label}.db"
+        shutil.copy2(self.db_path, backup_path)
+        return str(backup_path)
+
+    def get_data_health_summary(self) -> dict[str, object]:
+        def table_count(table_name: str) -> int:
+            if not self._table_exists(self.conn, table_name):
+                return 0
+            return int(self.conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()["count"])
+
+        latest_row = self.conn.execute("SELECT MAX(date) AS latest_date FROM transactions").fetchone()
+        backup_dir = self.db_path.parent / "backups"
+        backup_files = sorted(backup_dir.glob("*.db"), key=lambda path: path.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        duplicates_df = self.get_duplicate_transaction_groups()
+        return {
+            "active_db_path": str(self.db_path.resolve()),
+            "secondary_db_paths": [str(path.resolve()) for path in self.secondary_db_paths],
+            "transactions": table_count("transactions"),
+            "statement_rows": table_count("statement_rows"),
+            "posted_links": table_count("posted_links"),
+            "source_files": table_count("source_files"),
+            "import_batches": table_count("import_batches"),
+            "investment_trades": table_count("investment_trades"),
+            "latest_transaction_date": latest_row["latest_date"] if latest_row else "",
+            "duplicate_groups": int(len(duplicates_df)),
+            "duplicate_extra_rows": int(duplicates_df["duplicate_count"].sub(1).sum()) if not duplicates_df.empty else 0,
+            "latest_backup_path": str(backup_files[0]) if backup_files else "",
+            "latest_backup_count": len(backup_files),
+            "reconciliation_summary": dict(self.reconciliation_summary),
+        }
+
+    def get_duplicate_transaction_groups(self) -> pd.DataFrame:
+        columns = [
+            "group_id",
+            "date",
+            "description",
+            "debit_account",
+            "credit_account",
+            "amount",
+            "duplicate_count",
+            "keep_id",
+            "duplicate_ids",
+            "duplicate_ids_json",
+            "category_set",
+            "subcategory_set",
+            "total_amount",
+        ]
+        ledger_df = self.get_ledger()
+        if ledger_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        normalized = ledger_df.copy()
+        for column in ["date", "description", "debit_account", "credit_account", "category", "subcategory"]:
+            normalized[column] = normalized[column].fillna("").astype(str)
+        normalized["amount"] = normalized["amount"].fillna(0).astype(float).round(2)
+        identity_columns = ["date", "description", "debit_account", "credit_account", "amount"]
+        rows: list[dict[str, object]] = []
+        group_id = 0
+        for identity, group in normalized.groupby(identity_columns, dropna=False, sort=False):
+            if len(group) < 2:
+                continue
+            group = group.sort_values("id")
+            ids = [int(value) for value in group["id"].tolist()]
+            duplicate_ids = ids[1:]
+            group_id += 1
+            date_value, description, debit_account, credit_account, amount = identity
+            rows.append(
+                {
+                    "group_id": group_id,
+                    "date": date_value,
+                    "description": description,
+                    "debit_account": debit_account,
+                    "credit_account": credit_account,
+                    "amount": float(amount),
+                    "duplicate_count": len(ids),
+                    "keep_id": ids[0],
+                    "duplicate_ids": ", ".join(str(value) for value in duplicate_ids),
+                    "duplicate_ids_json": json.dumps(duplicate_ids),
+                    "category_set": " | ".join(sorted(set(group["category"].tolist()))),
+                    "subcategory_set": " | ".join(sorted(set(group["subcategory"].tolist()))),
+                    "total_amount": float(group["amount"].sum()),
+                }
+            )
+        return pd.DataFrame(rows, columns=columns).sort_values(
+            by=["duplicate_count", "date", "amount"],
+            ascending=[False, False, False],
+        )
+
+    def preview_duplicate_transaction_repair(self) -> pd.DataFrame:
+        return self.get_duplicate_transaction_groups()
+
+    def run_data_quality_audit(self, notes: str = "") -> dict[str, object]:
+        started_at = utc_now()
+        duplicates_df = self.get_duplicate_transaction_groups()
+        details = {
+            "duplicate_groups": int(len(duplicates_df)),
+            "duplicate_extra_rows": int(duplicates_df["duplicate_count"].sub(1).sum()) if not duplicates_df.empty else 0,
+        }
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO data_quality_runs (run_type, started_at, completed_at, status, notes, details_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("ledger_duplicate_audit", started_at, utc_now(), "completed", notes, json.dumps(details)),
+            )
+            run_id = int(cursor.lastrowid)
+            for row in duplicates_df.to_dict("records"):
+                transaction_ids = [int(row["keep_id"]), *json.loads(row["duplicate_ids_json"])]
+                finding_key = "|".join(
+                    [
+                        str(row["date"]),
+                        str(row["description"]),
+                        str(row["debit_account"]),
+                        str(row["credit_account"]),
+                        str(row["amount"]),
+                    ]
+                )
+                conn.execute(
+                    """
+                    INSERT INTO data_quality_findings (
+                        run_id, finding_type, severity, transaction_ids, finding_key, row_count, amount, details_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        "duplicate_transaction",
+                        "warning",
+                        json.dumps(transaction_ids),
+                        finding_key,
+                        int(row["duplicate_count"]),
+                        float(row["total_amount"]),
+                        json.dumps(row),
+                    ),
+                )
+        return {"run_id": run_id, **details}
+
+    def apply_duplicate_transaction_repair(
+        self,
+        duplicate_transaction_ids: Iterable[int] | None = None,
+        notes: str = "",
+    ) -> dict[str, object]:
+        preview_df = self.get_duplicate_transaction_groups()
+        candidate_ids: set[int] = set()
+        for row in preview_df.to_dict("records"):
+            candidate_ids.update(int(value) for value in json.loads(row["duplicate_ids_json"]))
+
+        requested_ids = (
+            {int(value) for value in duplicate_transaction_ids}
+            if duplicate_transaction_ids is not None
+            else candidate_ids
+        )
+        eligible_ids = sorted(candidate_ids & requested_ids)
+        if not eligible_ids:
+            return {
+                "deleted_count": 0,
+                "requested_count": len(requested_ids),
+                "skipped_linked_count": 0,
+                "backup_path": "",
+            }
+
+        placeholders = ",".join("?" for _ in eligible_ids)
+        linked_rows = self.conn.execute(
+            f"SELECT transaction_id FROM posted_links WHERE transaction_id IN ({placeholders})",
+            eligible_ids,
+        ).fetchall()
+        linked_ids = {int(row["transaction_id"]) for row in linked_rows}
+        repair_ids = [row_id for row_id in eligible_ids if row_id not in linked_ids]
+        if not repair_ids:
+            return {
+                "deleted_count": 0,
+                "requested_count": len(requested_ids),
+                "skipped_linked_count": len(linked_ids),
+                "backup_path": "",
+            }
+
+        backup_path = self.create_database_backup("before-duplicate-repair")
+        repair_placeholders = ",".join("?" for _ in repair_ids)
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM transactions WHERE id IN ({repair_placeholders})",
+                repair_ids,
+            )
+            deleted_count = int(cursor.rowcount or 0)
+            conn.execute(
+                """
+                INSERT INTO ledger_repair_actions (
+                    action_type, backup_path, affected_transaction_ids, affected_count, notes, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "delete_duplicate_transactions",
+                    backup_path,
+                    json.dumps(repair_ids),
+                    deleted_count,
+                    notes,
+                    utc_now(),
+                ),
+            )
+        return {
+            "deleted_count": deleted_count,
+            "requested_count": len(requested_ids),
+            "skipped_linked_count": len(linked_ids),
+            "backup_path": backup_path,
+        }
+
+    def get_data_quality_runs_df(self) -> pd.DataFrame:
+        return pd.read_sql_query(
+            """
+            SELECT id, run_type, started_at, completed_at, status, notes, details_json
+            FROM data_quality_runs
+            ORDER BY id DESC
+            """,
+            self.conn,
+        )
+
+    def get_data_quality_findings_df(self, run_id: int | None = None) -> pd.DataFrame:
+        where = ""
+        params: list[int] = []
+        if run_id is not None:
+            where = "WHERE run_id = ?"
+            params.append(int(run_id))
+        return pd.read_sql_query(
+            f"""
+            SELECT id, run_id, finding_type, severity, transaction_ids, finding_key, row_count, amount, details_json
+            FROM data_quality_findings
+            {where}
+            ORDER BY id DESC
+            """,
+            self.conn,
+            params=params,
+        )
+
+    def get_ledger_repair_actions_df(self) -> pd.DataFrame:
+        return pd.read_sql_query(
+            """
+            SELECT id, action_type, backup_path, affected_transaction_ids, affected_count, notes, created_at
+            FROM ledger_repair_actions
+            ORDER BY id DESC
+            """,
+            self.conn,
+        )
+
+    def get_investment_trades_df(self, status: str = "") -> pd.DataFrame:
+        where = ""
+        params: list[str] = []
+        if status:
+            where = "WHERE review_status = ?"
+            params.append(status)
+        return pd.read_sql_query(
+            f"""
+            SELECT
+                id, transaction_id, trade_date, action, ticker, quantity, amount, fees,
+                currency, parse_confidence, review_status, notes, created_at, updated_at
+            FROM investment_trades
+            {where}
+            ORDER BY trade_date DESC, id DESC
+            """,
+            self.conn,
+            params=params,
+        )
+
+    def upsert_investment_trade(self, trade: dict) -> int:
+        timestamp = utc_now()
+        transaction_id = trade.get("transaction_id")
+        payload = (
+            int(transaction_id) if transaction_id not in (None, "") else None,
+            str(trade.get("trade_date") or "").strip(),
+            str(trade.get("action") or "").strip().lower(),
+            str(trade.get("ticker") or "").strip().upper(),
+            float(trade.get("quantity") or 0),
+            float(trade.get("amount") or 0),
+            float(trade.get("fees") or 0),
+            str(trade.get("currency") or "VND").strip() or "VND",
+            float(trade.get("parse_confidence") or 0),
+            str(trade.get("review_status") or "needs_review").strip() or "needs_review",
+            str(trade.get("notes") or ""),
+            timestamp,
+            timestamp,
+        )
+        if payload[0] is not None:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO investment_trades (
+                    transaction_id, trade_date, action, ticker, quantity, amount, fees, currency,
+                    parse_confidence, review_status, notes, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(transaction_id) DO UPDATE SET
+                    trade_date = excluded.trade_date,
+                    action = excluded.action,
+                    ticker = excluded.ticker,
+                    quantity = excluded.quantity,
+                    amount = excluded.amount,
+                    fees = excluded.fees,
+                    currency = excluded.currency,
+                    parse_confidence = excluded.parse_confidence,
+                    review_status = CASE
+                        WHEN investment_trades.review_status = 'reviewed' THEN investment_trades.review_status
+                        ELSE excluded.review_status
+                    END,
+                    notes = excluded.notes,
+                    updated_at = excluded.updated_at
+                """,
+                payload,
+            )
+            self.conn.commit()
+            existing = self.conn.execute(
+                "SELECT id FROM investment_trades WHERE transaction_id = ?",
+                (payload[0],),
+            ).fetchone()
+            return int(existing["id"] if existing else cursor.lastrowid)
+
+        cursor = self.conn.execute(
+            """
+            INSERT INTO investment_trades (
+                transaction_id, trade_date, action, ticker, quantity, amount, fees, currency,
+                parse_confidence, review_status, notes, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def update_investment_trade(
+        self,
+        trade_id: int,
+        trade_date: str,
+        action: str,
+        ticker: str,
+        quantity: float,
+        amount: float,
+        fees: float,
+        review_status: str,
+        notes: str = "",
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE investment_trades
+            SET trade_date = ?, action = ?, ticker = ?, quantity = ?, amount = ?, fees = ?,
+                review_status = ?, notes = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                trade_date,
+                action,
+                ticker.upper(),
+                float(quantity),
+                float(amount),
+                float(fees),
+                review_status,
+                notes,
+                utc_now(),
+                int(trade_id),
+            ),
+        )
+        self.conn.commit()
+
+    def set_investment_trade_status(self, trade_ids: Iterable[int], status: str) -> int:
+        trade_ids = [int(trade_id) for trade_id in trade_ids]
+        if not trade_ids:
+            return 0
+        placeholders = ",".join("?" for _ in trade_ids)
+        cursor = self.conn.execute(
+            f"UPDATE investment_trades SET review_status = ?, updated_at = ? WHERE id IN ({placeholders})",
+            [status, utc_now(), *trade_ids],
+        )
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def get_investment_price_snapshots_df(self) -> pd.DataFrame:
+        return pd.read_sql_query(
+            """
+            SELECT id, ticker, price_date, price, currency, notes, updated_at
+            FROM investment_price_snapshots
+            ORDER BY price_date DESC, ticker
+            """,
+            self.conn,
+        )
+
+    def upsert_investment_price_snapshot(
+        self,
+        ticker: str,
+        price_date: str,
+        price: float,
+        currency: str = "VND",
+        notes: str = "",
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO investment_price_snapshots (ticker, price_date, price, currency, notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, price_date) DO UPDATE SET
+                price = excluded.price,
+                currency = excluded.currency,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(ticker or "").strip().upper(),
+                str(price_date or "").strip(),
+                float(price),
+                str(currency or "VND").strip() or "VND",
+                str(notes or ""),
+                utc_now(),
+            ),
+        )
+        self.conn.commit()
 
     def create_import_batch(self) -> int:
         cursor = self.conn.execute(
@@ -666,9 +1355,51 @@ class FinanceRepository:
         """
         return pd.read_sql_query(query, self.conn, params=params)
 
+    def get_statement_review_df(
+        self,
+        source_type: str = "",
+        status: str = "",
+        month: str = "",
+    ) -> pd.DataFrame:
+        frame = self.get_statement_rows_df(source_type, status, month)
+        if frame.empty:
+            return frame
+
+        frame = frame.copy()
+        frame["transaction_date"] = frame["transaction_date"].fillna("")
+        frame["post_date"] = frame["post_date"].fillna("")
+        frame["category"] = frame["category"].fillna(FALLBACK_CATEGORY)
+        frame["subcategory"] = frame["subcategory"].fillna(FALLBACK_SUBCATEGORY)
+        frame["needs_category"] = ~frame["category"].isin(CATEGORY_MAP.keys()) | frame["category"].eq(FALLBACK_CATEGORY)
+        frame["valid_subcategory"] = frame.apply(
+            lambda row: row["subcategory"] in CATEGORY_MAP.get(row["category"], []),
+            axis=1,
+        )
+        frame["needs_subcategory"] = ~frame["valid_subcategory"] | (
+            frame["category"].eq(FALLBACK_CATEGORY) & frame["subcategory"].eq(FALLBACK_SUBCATEGORY)
+        )
+        frame["needs_accounts"] = ~frame["debit_account"].isin(ACCOUNT_OPTIONS) | ~frame["credit_account"].isin(ACCOUNT_OPTIONS)
+        frame["invalid_amount"] = ~frame["amount"].apply(self._is_valid_amount)
+        frame["invalid_date"] = ~frame.apply(
+            lambda row: self._is_valid_transaction_date(row["transaction_date"] or row["post_date"]),
+            axis=1,
+        )
+        frame["low_confidence"] = frame["confidence"].fillna(0).astype(float) < LOW_CONFIDENCE_THRESHOLD
+        frame["review_state"] = frame.apply(self._statement_row_state, axis=1)
+        frame["is_fallback"] = frame["category"].eq(FALLBACK_CATEGORY) & frame["subcategory"].eq(FALLBACK_SUBCATEGORY)
+        frame["ready_to_post"] = frame["review_state"].eq("ready_to_post")
+        return frame
+
     def update_statement_row_edits(self, rows: Iterable[dict]) -> None:
+        validation_errors: list[str] = []
         with self.transaction() as conn:
             for row in rows:
+                category = str(row.get("category") or FALLBACK_CATEGORY).strip() or FALLBACK_CATEGORY
+                subcategory = str(row.get("subcategory") or FALLBACK_SUBCATEGORY).strip() or FALLBACK_SUBCATEGORY
+                row_errors = self.validate_statement_classification(category, subcategory)
+                if row_errors:
+                    validation_errors.append(f"Row {row.get('id')}: {' '.join(row_errors)}")
+                    continue
                 conn.execute(
                     """
                     UPDATE statement_rows
@@ -679,8 +1410,8 @@ class FinanceRepository:
                     (
                         row.get("transaction_date") or "",
                         row.get("description") or "",
-                        row.get("category") or "Others",
-                        row.get("subcategory") or "Other expense",
+                        category,
+                        subcategory,
                         row.get("debit_account") or "Expense",
                         row.get("credit_account") or "Cash",
                         float(row.get("amount") or 0),
@@ -688,6 +1419,8 @@ class FinanceRepository:
                         int(row["id"]),
                     ),
                 )
+        if validation_errors:
+            raise ValueError(" ".join(validation_errors))
 
     def set_statement_status(self, row_ids: Iterable[int], status: str) -> int:
         row_ids = [int(row_id) for row_id in row_ids]
@@ -756,6 +1489,50 @@ class FinanceRepository:
                 if existing is not None:
                     messages.append(f"Row {row_id} was already linked to transaction {existing['transaction_id']}.")
                     continue
+                row_errors = self._statement_row_validation_errors(row)
+                if row_errors:
+                    messages.append(f"Row {row_id} was skipped: {' '.join(row_errors)}")
+                    continue
+                effective_date = row["transaction_date"] or row["post_date"] or ""
+                raw_text = str(row["raw_text"] or "").strip()
+                if raw_text:
+                    duplicate_posted_row = conn.execute(
+                        """
+                        SELECT id, posted_transaction_id
+                        FROM statement_rows
+                        WHERE id != ?
+                          AND review_status = 'posted'
+                          AND posted_transaction_id IS NOT NULL
+                          AND COALESCE(source_type, '') = ?
+                          AND COALESCE(raw_text, '') = ?
+                          AND COALESCE(NULLIF(transaction_date, ''), NULLIF(post_date, ''), '') = ?
+                          AND COALESCE(description, '') = ?
+                          AND COALESCE(category, '') = ?
+                          AND COALESCE(subcategory, '') = ?
+                          AND COALESCE(debit_account, '') = ?
+                          AND COALESCE(credit_account, '') = ?
+                          AND COALESCE(amount, 0) = ?
+                        LIMIT 1
+                        """,
+                        (
+                            row_id,
+                            row["source_type"] or "",
+                            raw_text,
+                            effective_date,
+                            row["description"] or "",
+                            row["category"] or "",
+                            row["subcategory"] or "",
+                            row["debit_account"] or "",
+                            row["credit_account"] or "",
+                            float(row["amount"] or 0),
+                        ),
+                    ).fetchone()
+                    if duplicate_posted_row is not None:
+                        messages.append(
+                            f"Row {row_id} duplicates posted statement row {duplicate_posted_row['id']} "
+                            f"linked to transaction {duplicate_posted_row['posted_transaction_id']}."
+                        )
+                        continue
 
                 cursor = conn.execute(
                     """
@@ -809,24 +1586,13 @@ class FinanceRepository:
         return posted, messages
 
     def get_statement_insights(self) -> pd.DataFrame:
-        query = """
-            SELECT
-                id,
-                source_type,
-                statement_month,
-                transaction_date,
-                description,
-                merchant,
-                amount,
-                direction,
-                row_type,
-                review_status,
-                confidence,
-                parse_notes,
-                category,
-                subcategory
-            FROM statement_rows
-            WHERE review_status != 'ignored'
-            ORDER BY statement_month, transaction_date, id
-        """
-        return pd.read_sql_query(query, self.conn)
+        frame = self.get_statement_review_df()
+        if frame.empty:
+            return frame
+        frame = frame[frame["review_status"] != "ignored"].copy()
+        sort_order = {"needs_review": 0, "ready_to_post": 1, "posted": 2, "ignored": 3}
+        frame["review_priority"] = frame["review_state"].map(sort_order).fillna(9)
+        return frame.sort_values(
+            by=["review_priority", "low_confidence", "statement_month", "transaction_date", "id"],
+            ascending=[True, False, False, False, False],
+        )
